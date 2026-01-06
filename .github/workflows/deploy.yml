@@ -1,0 +1,160 @@
+name: Build and Deploy to GHCR
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # 镜像仓库地址 (Github Container Registry)
+  REGISTRY: ghcr.io
+  # 部署目标目录 (动态拼接：/opt/stacks/项目名)
+  # github.event.repository.name 仅包含项目名 (例如: icp_yesxno)
+  DEPLOY_DIR: /opt/stacks/${{ github.event.repository.name }}
+  # 容器名称 (默认为项目名，复制到其他项目可直接通用)
+  CONTAINER_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    # 这一步至关重要：允许 Action 读写 Packages
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 1. 登录到 GHCR (构建端)
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. 构建并推送镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 推送标签：latest
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}:latest
+
+      # 3. 准备服务器目录 (自动创建并修正权限)
+      - name: Create Remote Directory
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          script: |
+            # 定义目标目录
+            TARGET_DIR="${{ env.DEPLOY_DIR }}"
+            USER="${{ secrets.SERVER_USER }}"
+            
+            echo "Checking directory: $TARGET_DIR"
+            
+            # 1. 尝试创建目录（如果不存在）
+            # 使用 sudo -n (non-interactive) 避免交互式密码提示卡死
+            if [ ! -d "$TARGET_DIR" ]; then
+              echo "Directory does not exist. Creating..."
+              if sudo -n true 2>/dev/null; then
+                sudo mkdir -p "$TARGET_DIR"
+                sudo chown -R "$USER:$USER" "$TARGET_DIR"
+              else
+                # 如果没有 sudo 免密权限，尝试直接创建 (适用于当前用户有权操作父目录的情况)
+                mkdir -p "$TARGET_DIR"
+              fi
+            fi
+            
+            # 2. 再次确认权限 (确保当前用户可写)
+            # 如果目录已存在但属于 root，这里尝试修正
+            if [ -d "$TARGET_DIR" ] && [ ! -w "$TARGET_DIR" ]; then
+               echo "Directory exists but is not writable. Attempting to fix ownership..."
+               if sudo -n true 2>/dev/null; then
+                 sudo chown -R "$USER:$USER" "$TARGET_DIR"
+               else
+                 echo "WARNING: Directory is not writable and I don't have sudo access to fix it."
+               fi
+            fi
+            
+            echo "Directory check complete."
+
+      # 4. 只传输 docker-compose.yml 到服务器
+      - name: Copy Config to Server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          source: "docker-compose.yml"
+          target: ${{ env.DEPLOY_DIR }}
+
+      # 5. 远程部署
+      - name: SSH Remote Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          # 将 GITHUB_TOKEN 和 CONTAINER_NAME 传递给 SSH 脚本
+          envs: GITHUB_TOKEN,REGISTRY,DEPLOY_DIR,CONTAINER_NAME
+          script: |
+            # 开启错误检查：任何命令出错立即停止
+            set -e
+            
+            # 1. 使用本次的临时 Token 登录 GHCR (让服务器有权拉镜像)
+            echo $GITHUB_TOKEN | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # 2. 确保 Docker 网络存在
+            if ! docker network inspect global_proxy >/dev/null 2>&1; then
+              echo "Network 'global_proxy' does not exist. Creating..."
+              docker network create global_proxy
+            fi
+            
+            # 3. 进入目录
+            cd $DEPLOY_DIR
+            
+            # 4. 设置环境变量
+            export FULL_IMAGE_NAME="${REGISTRY}/${{ github.repository }}:latest"
+            # 注意: CONTAINER_NAME 会通过 envs 自动注入到当前 shell 环境中
+            # docker-compose.yml 会直接读取该变量
+            
+            # 5. 拉取最新镜像 (带重试机制，应对网络波动)
+            echo "Pulling image with retries..."
+            count=0
+            until docker compose pull; do
+              count=$((count+1))
+              if [ $count -ge 5 ]; then
+                echo "Failed to pull image after 5 attempts."
+                exit 1
+              fi
+              echo "Pull failed (Attempt $count/5). Retrying in 10s..."
+              sleep 10
+            done
+            
+            # 6. 重启容器 (后台运行)
+            docker compose up -d --remove-orphans
+            
+            # 7. 清理旧镜像
+            docker image prune -f
+
+            # 8. 健康检查 (Health Check)
+            echo "Waiting for container to initialize..."
+            sleep 10
+            
+            echo "Verifying deployment for container: $CONTAINER_NAME"
+            # 检查名为 $CONTAINER_NAME 的容器是否处于运行状态
+            if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
+                echo "✅ Deployment successful! Container '$CONTAINER_NAME' is running."
+            else
+                echo "❌ Deployment FAILED! Container '$CONTAINER_NAME' is NOT running."
+                echo "Displaying last 50 lines of logs:"
+                docker logs $CONTAINER_NAME --tail 50
+                exit 1
+            fi

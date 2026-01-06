@@ -1,0 +1,15 @@
+services:
+  app:
+    # 强制指定容器名，方便 NPM 引用和日志查看
+    # 使用变量以支持多项目复用 (在 CI/CD 中注入)
+    container_name: ${CONTAINER_NAME}
+    # 使用 GitHub Container Registry 上的私有镜像
+    # 格式：ghcr.io/用户名/仓库名:标签
+    image: ${FULL_IMAGE_NAME}
+    restart: always
+    networks:
+      - global_proxy
+
+networks:
+  global_proxy:
+    external: true # 告诉 Docker 使用你手动创建的那个“全局网关”网络
