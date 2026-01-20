@@ -9,6 +9,13 @@ services:
     restart: always
     networks:
       - global_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.proxy-sub.rule=Host(`proxy-sub.yesxno.com`)
+      - traefik.http.routers.proxy-sub.entrypoints=websecure
+      - traefik.http.routers.proxy-sub.tls=true
+      - traefik.http.services.proxy-sub.loadbalancer.server.port=3000
+
 
 networks:
   global_proxy:
