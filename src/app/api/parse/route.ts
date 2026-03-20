@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
 import { Base64 } from 'js-base64'
 import ky from 'ky'
+import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -11,12 +11,19 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const origin = new URL(url).origin
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      Referer: origin,
+      Origin: origin,
+    }
+
     // 获取原始订阅内容
     const rawContent = await ky
       .get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
+        headers,
         timeout: 10000,
       })
       .text()

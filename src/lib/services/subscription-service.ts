@@ -1,6 +1,18 @@
 import ky from 'ky'
+import { ClientType, convertNodes } from '../converters/format-converter'
 import { parseSubscriptionContent } from '../parsers/node-parser'
-import { convertNodes, ClientType } from '../converters/format-converter'
+
+function buildFetchHeaders(url: string) {
+  const origin = new URL(url).origin
+
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+    Referer: origin,
+    Origin: origin,
+  }
+}
 
 export class SubscriptionService {
   /**
@@ -9,9 +21,7 @@ export class SubscriptionService {
   private async fetchSubscriptionContent(url: string): Promise<string> {
     return ky
       .get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
+        headers: buildFetchHeaders(url),
         timeout: 10000,
       })
       .text()
